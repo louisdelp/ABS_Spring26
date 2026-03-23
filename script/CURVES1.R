@@ -6,8 +6,8 @@ library(dplyr)
 # Data preparation (hopefully has everything)
 # in theory, set seed too for simulations!
 
-speaker1 <- load(file = "data/speaker1_tongue_shapes.RData")
-speaker2 <- load(file = "data/speaker2_tongue_shapes.RData")
+load(file = "data/speaker1_tongue_shapes.RData")
+load(file = "data/speaker2_tongue_shapes.RData")
 
 # first speaker
 df1 <- data.frame(
