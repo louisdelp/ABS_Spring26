@@ -2,8 +2,8 @@ library(MASS)
 library(ggplot2)
 library(dplyr)
 
-load('/Users/maxjones/Desktop/Prog datasets/Bayesian Stats/speaker1_tongue_shapes.RData')
-load('/Users/maxjones/Desktop/Prog datasets/Bayesian Stats/speaker2_tongue_shapes.RData')
+load(file = "data/speaker1_tongue_shapes.RData")
+load(file = "data/speaker2_tongue_shapes.RData")
 
 dim(speaker1)
 dim(speaker2)
@@ -85,7 +85,7 @@ ggplot(df2, aes(x = point, y = y, group = point)) +
   facet_wrap(~shape, ncol = 5) +      
   coord_fixed() +                    
   theme_minimal()+
-  labs(title = "Speaker 1 Tongue Shapes (10 images, first two have missing points)")
+  labs(title = "Speaker 2 Tongue Shapes (10 images, first two have missing points)")
 
 
 ####
@@ -114,7 +114,7 @@ ggplot(df2, aes(x = point2, y = y, group = point2)) +
   facet_wrap(~shape, ncol = 5) +      
   coord_fixed() +                    
   theme_minimal()+
-  labs(title = "Speaker 1 Tongue Shapes (10 images, first two have missing points)")
+  labs(title = "Speaker 2 Tongue Shapes (10 images, first two have missing points)")
 
 
 ##############
