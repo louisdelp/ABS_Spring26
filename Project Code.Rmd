@@ -1,0 +1,569 @@
+---
+title: "Curve Fitting"
+author: "Katrin Kulberg, Maximilian Brunner, Salomé Moret, Louis del Perugia"
+date: "03.04.2026"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# libraries
+library(dplyr)
+library(ggplot2)
+library(MASS)
+```
+
+## Data Preprocessing
+
+```{r}
+# loading data
+load("data/speaker1_tongue_shapes.RData")
+load("data/speaker2_tongue_shapes.RData")
+
+# transforming data into a data frame shape
+# first speaker
+df1 <- data.frame(
+  x = as.vector(speaker1[, 1, ]), # Store the 1st column as a vector for the x
+  y = as.vector(speaker1[, 2, ]), # Store the 2nd column as a vector for the y
+  t = rep(1:dim(speaker1)[1], times = dim(speaker1)[3]), # Indice of the point along the curve (65 per shape)
+  shape = rep(1:dim(speaker1)[3], each = dim(speaker1)[1]), # Indice of the shape
+  speaker = 1
+)
+
+# second speaker
+df2 <- data.frame(
+  x = as.vector(speaker2[, 1, ]), # Store the 1st column as a vector for the x
+  y = as.vector(speaker2[, 2, ]), # Store the 2nd column as a vector for the y
+  t = rep(1:dim(speaker2)[1], times = dim(speaker2)[3]), # Indice of the point along the curve (65 per shape)
+  shape = rep(1:dim(speaker2)[3], each = dim(speaker2)[1]), # Indice of the shape for each point
+  speaker = 2
+)
+
+# reordering the indices t for speaker 2
+df2$t <- 45 - df2$t + 1 # The points are in the "wrong" order, last point is the first one
+
+# Given that the 5th shape was already in the right order, reordering that shape again
+# Additionally removing an outlier from shape 5
+df2 <- df2 %>%
+  mutate(t = ifelse(shape == 5, 45 - t + 1, t)) %>%
+  filter(!(shape == 5 & t == 45))
+
+
+# Adding standardised index t to both data frames
+# (multiplying by 1/(n+1))
+df1$t_standardised <- df1$t / 66
+df2$t_standardised <- df2$t / 46
+```
+
+## Descriptive Overview
+
+```{r}
+# FULL CURVES
+
+# curves of speaker 1
+ggplot(df1, aes(x = x, y = y)) + #
+  geom_point(size = 1) +
+  facet_wrap(~shape, ncol = 5) +
+  coord_fixed() +
+  theme_bw()
+
+# curves of speaker 2
+ggplot(df2, aes(x = x, y = y)) +
+  geom_point(size = 1) +
+  facet_wrap(~shape, ncol = 5) +
+  coord_fixed() +
+  theme_bw()
+
+# MARGINAL CURVES
+
+# speaker 1, x curve
+ggplot(df1, aes(x = t, y = x)) +
+  geom_point(size = 1) +
+  facet_wrap(~shape, ncol = 5) +
+  coord_fixed() +
+  theme_bw()
+
+# speaker 1, y curve
+ggplot(df1, aes(x = t, y = y)) +
+  geom_point(size = 1) +
+  facet_wrap(~shape, ncol = 5) +
+  coord_fixed() +
+  theme_bw()
+
+# speaker 2, x curve
+ggplot(df2, aes(x = t, y = x)) +
+  geom_point(size = 1) +
+  facet_wrap(~shape, ncol = 5) +
+  coord_fixed() +
+  theme_bw()
+
+# speaker 2, y curve
+ggplot(df2, aes(x = t, y = y)) +
+  geom_point(size = 1) +
+  facet_wrap(~shape, ncol = 5) +
+  coord_fixed() +
+  theme_bw()
+```
+
+# Function Definitions
+
+```{r}
+# Function that, for given x and y, calculates coefficients for the polynomial basis for a given degree
+coefs <- function(x, y, degree) {
+  # design matrix
+  X_poly <- sapply(0:degree, function(i) x^i)
+  # finding coefficients
+  model <- lm(y ~ X_poly - 1)
+  beta <- coef(model)
+
+  return(beta)
+}
+
+# function that computes coefficients for the fully observed curves
+# data frame, variable and degree can be specified
+compute_betas <- function(df, variable, degree, shapes = 3:10) {
+  betas_list <- lapply(shapes, function(i) {
+    # selecting response
+    y <- df[df$shape == i, variable]
+
+    # based on standardised index t
+    coefs(df[df$shape == i, "t_standardised"], y, degree)
+  })
+
+  do.call(rbind, betas_list)
+}
+
+# function that selects the best fitting curves based on observed data
+# number of curves can be specified
+curve_selection <- function(X_observed, y_observed, number = 6) {
+  results <- matrix(NA, nrow = ncol(X_observed), ncol = 2)
+
+  for (i in 1:ncol(X_observed)) {
+    # similarity is based on squared difference
+    similarity <- sum((X_observed[, i] - y_observed)^2)
+    results[i, 1] <- i
+    results[i, 2] <- similarity
+  }
+
+  # sorting by similarity in an ascending order
+  results <- results[order(results[, 2]), ]
+
+  # returning indices
+  return(results[1:number, 1])
+}
+
+# function for Gibbs sampling in case of modelling x and y curves separately
+Gibbs_1d <- function(x, y, coefs, observed, simulations) {
+  # for testing purposes
+  # x <- subset(df1, shape == 1)$t_standardised
+  # coefs <- coefs_X
+  # observed <- 21:65
+  # y <- subset(df1, shape == 1)$x
+  # simulations <- 5000
+
+  # building design matrix
+  X_poly <- sapply(0:(ncol(coefs) - 1), function(i) x^i)
+  X_full <- t((coefs) %*% t(X_poly))
+
+  # choosing the observed parts
+  y_observed <- y[observed]
+  X_observed <- X_full[observed, ]
+
+  # curve selection
+  selected <- curve_selection(X_observed, y_observed, ncol(coefs))
+  X_observed <- X_observed[, selected]
+  X_full <- X_full[, selected]
+
+
+  # initialising parameters for priors
+  p <- ncol(X_observed)
+  beta0 <- rep(0.5, p)
+  Sigma0_inv <- 1 / 1 * diag(1, p)
+  n <- length(y_observed)
+
+  # choose
+  nu0 <- 2
+  s20 <- 5
+
+  beta_samples <- matrix(NA, nrow = simulations, ncol = p)
+  sigma2_samples <- numeric(simulations)
+
+  # setting initial values
+  beta_samples[1, ] <- rep(1 / p, p)
+  sigma2_samples[1] <- var(y_observed)
+  n <- length(y_observed)
+
+  for (iter in 2:simulations) {
+    # update beta
+    # finding covariance matrix
+    V_beta <- solve(t(X_observed) %*% X_observed / sigma2_samples[iter - 1] + Sigma0_inv)
+    # find mean vectors
+    m_beta <- V_beta %*% (t(X_observed) %*% y_observed / sigma2_samples[iter - 1] + Sigma0_inv %*% beta0)
+
+    # sampling
+    # beta_samples[iter, ] <- m_beta + t(chol(V_beta)) %*% rnorm(p)
+    beta_samples[iter, ] <- mvrnorm(1, mu = m_beta, Sigma = V_beta)
+
+    # updating sigma^2
+
+    # calculating SSR
+    SSR <- sum((y_observed - X_observed %*% beta_samples[iter, ])^2)
+
+    # parameters for inverse gamma
+    shape_sig <- (nu0 + n) / 2
+    rate_sig <- (nu0 * s20 + SSR) / 2
+
+    # sampling
+    sigma2_samples[iter] <- 1 / rgamma(1, shape = shape_sig, rate = rate_sig)
+  }
+
+  # predictions for the full curve
+  predictions <- X_full %*% t(beta_samples)
+
+  # returning predictions, betas and selected curves
+  return(list(
+    predictions = predictions,
+    beta_samples = beta_samples,
+    selected = selected
+  ))
+}
+
+# function for Gibbs sampling in case of modelling x and y curves together
+Gibbs_2d <- function(points, x, y, coefs_X, coefs_Y, observed, simulations) {
+  # for testing purposes
+
+  # points <- subset(df1, shape == 1)$t_standardised
+  # points <- 1:65
+  # coefs_X <- coefs_X_speaker1
+  # coefs_Y <- coefs_Y_speaker1
+  # observed <- c(1:19, 41:65)
+  # observed <- 21:65
+  # x <- subset(df1, shape == 1)$x
+  # y <- subset(df1, shape == 1)$y
+  # simulations <- 5000
+
+  # building design matrix for x and y
+  X_poly_x <- sapply(0:(ncol(coefs_X) - 1), function(i) points^i)
+  X_poly_y <- sapply(0:(ncol(coefs_Y) - 1), function(i) points^i)
+  X_full_x <- t((coefs_X) %*% t(X_poly_x))
+  X_full_y <- t((coefs_Y) %*% t(X_poly_y))
+
+  # combining x and y
+  X_full <- rbind(X_full_x, X_full_y)
+
+  # choosing the observed parts for both
+  X_observed_x <- X_full_x[observed, ]
+  X_observed_y <- X_full_y[observed, ]
+  y_observed_x <- x[observed]
+  y_observed_y <- y[observed]
+
+  # combining the observed parts
+  y_observed <- c(y_observed_x, y_observed_y)
+  X_observed <- rbind(X_observed_x, X_observed_y)
+
+  # curve selection (11 curves)
+  selected <- curve_selection(X_observed, y_observed, (ncol(coefs_X) + ncol(coefs_Y)))
+  X_observed <- X_observed[, selected]
+  X_full <- X_full[, selected]
+
+
+  # initialising parameters for priors
+  p <- ncol(X_observed)
+  beta0 <- rep(0.5, p)
+  Sigma0_inv <- 1 / 1 * diag(1, p)
+
+  # choose
+  nu0 <- 2 * 2
+  s20 <- 5 * 2.5
+  n <- length(y_observed)
+
+  beta_samples <- matrix(NA, nrow = simulations, ncol = p)
+  sigma2_samples <- numeric(simulations)
+
+  # initial values
+  beta_samples[1, ] <- rep(1 / p, p)
+  sigma2_samples[1] <- var(y_observed)
+
+  for (iter in 2:simulations) {
+    # updating beta
+    # finding covariance matrix
+    V_beta <- solve((t(X_observed) %*% X_observed) / sigma2_samples[iter - 1] + Sigma0_inv)
+
+    # finding mean vectors
+    m_beta <- V_beta %*% ((t(X_observed) %*% y_observed) / sigma2_samples[iter - 1] + Sigma0_inv %*% beta0)
+
+    # sampling beta
+    # beta_samples[iter, ] <- m_beta + t(chol(V_beta)) %*% rnorm(p)
+    beta_samples[iter, ] <- mvrnorm(1, mu = m_beta, Sigma = V_beta)
+
+    # updating sigma^2
+
+    # SSR
+    SSR <- sum((y_observed - X_observed %*% beta_samples[iter, ])^2)
+
+    # parameters for inverse gamma
+    shape_sig <- (nu0 + n) / 2
+    rate_sig <- (nu0 * s20 + SSR) / 2
+
+    # sampling
+    sigma2_samples[iter] <- 1 / rgamma(1, shape = shape_sig, rate = rate_sig)
+  }
+
+  # predictions for the full curve
+  predictions <- X_full %*% t(beta_samples)
+
+  # returning predictions, betas and selected curves
+  return(list(
+    predictions = predictions,
+    beta_samples = beta_samples,
+    selected = selected
+  ))
+}
+
+# function that plots the curve with credible interval in 1D
+summarise_results_1d <- function(predictions, points, true_data) {
+  # summarising as a data frame
+  df <- data.frame(
+    best_estimate = apply(predictions, 1, quantile, probs = 0.5),
+    lower_95 = apply(predictions, 1, quantile, probs = 0.025),
+    upper_95 = apply(predictions, 1, quantile, probs = 0.975)
+  )
+
+  # plotting
+  p <- ggplot(df, aes(x = points)) +
+    geom_line(aes(y = best_estimate), color = "black", linewidth = 1) +
+    geom_line(aes(y = lower_95), color = "black", linetype = "dashed") +
+    geom_line(aes(y = upper_95), color = "black", linetype = "dashed") +
+    geom_point(aes(y = true_data), color = "red") +
+    labs(x = "t", y = "x") +
+    theme_bw()
+
+  return(p)
+}
+
+# function that plots the curve with credible interval in 2D
+summarise_results_2d <- function(predictions_x, predictions_y, points, true_data_x, true_data_y) {
+  # testing
+  # predictions_x <- predictions_x_speaker1_curve1
+  # predictions_y <- predictions_y_speaker1_curve1
+
+  # points <- 1:65
+  # true_data_x <- subset(df1, df1$shape == 2)$x
+  # true_data_y <- subset(df1, df1$shape == 2)$y
+
+  # summarising as a data frame
+  df_xy <- data.frame(
+    best_estimate_x = apply(predictions_x, 1, quantile, probs = 0.5),
+    lower_95_x = apply(predictions_x, 1, quantile, probs = 0.025),
+    upper_95_x = apply(predictions_x, 1, quantile, probs = 0.975),
+    best_estimate_y = apply(predictions_y, 1, quantile, probs = 0.5),
+    lower_95_y = apply(predictions_y, 1, quantile, probs = 0.025),
+    upper_95_y = apply(predictions_y, 1, quantile, probs = 0.975)
+  )
+
+
+  # plotting
+  # (IN PROGRESS but the current version works as a quick sanity check)
+  p <- ggplot() +
+    geom_rect(
+      data = df_xy,
+      aes(
+        xmin = lower_95_x,
+        xmax = upper_95_x,
+        ymin = lower_95_y,
+        ymax = upper_95_y
+      ),
+      fill = "grey70", alpha = 0.3
+    ) +
+    # these rectangles do not model correctly the joint credible interval technically in case of 2d
+    # since rectangles essentially correspond to independent x and y (so 1st case is ok)
+    # best estimate
+    geom_path(
+      data = df_xy,
+      aes(x = best_estimate_x, y = best_estimate_y),
+      color = "black", linewidth = 1.2
+    ) +
+    geom_point(aes(x = true_data_x, y = true_data_y), color = "red") +
+    theme_bw() +
+    labs(x = "x", y = "y")
+
+  return(p)
+}
+```
+
+
+# Conjugate model (example)
+
+```{r}
+# without sampling sigma^2
+# could be done for both 1D and 2D.
+# as an example, here is for 1D, speaker 1, x
+
+# setting degrees
+degree_x <- 5
+degree_y <- 4
+
+coefs_X_speaker1 <- compute_betas(df1, "x", degree_x)
+coefs_Y_speaker1 <- compute_betas(df1, "y", degree_y)
+
+coefs_X_speaker2 <- compute_betas(df2, "x", degree_x)
+coefs_Y_speaker2 <- compute_betas(df2, "y", degree_y)
+
+######################################################
+
+conjugate_model_1d <- function(x, y, coefs, observed, samples) {
+  X_poly <- sapply(0:(ncol(coefs) - 1), function(i) x^i)
+  X_full <- t((coefs) %*% t(X_poly))
+
+  y_observed <- y[observed]
+  X_observed <- X_full[observed, ]
+
+  # curve selection
+  selected <- curve_selection(X_observed, y_observed, ncol(coefs))
+  X_observed <- X_observed[, selected]
+  X_full <- X_full[, selected]
+
+  # initialising parameters for priors
+  p <- ncol(X_observed)
+  # priors
+  beta0 <- rep(0.5, p)
+  Sigma0_inv <- 1 / 0.5 * diag(1, p)
+  sigma2 <- 2 # FIXED! really depends on this; this can be investigated further which choice makes the most sense
+  n <- length(y_observed)
+
+  # calculating covariance and mean
+  V_beta <- solve(t(X_observed) %*% X_observed / sigma2 + Sigma0_inv)
+  m_beta <- V_beta %*% (t(X_observed) %*% y_observed / sigma2 + Sigma0_inv %*% beta0)
+
+  # sampling
+  beta_samples <- mvrnorm(samples, mu = m_beta, Sigma = V_beta)
+
+  predictions <- X_full %*% t(beta_samples)
+
+  return(predictions)
+}
+
+
+curve_1x_speaker1 <- conjugate_model_1d(subset(df1, shape == 1)$t_standardised, subset(df1, shape == 1)$x, coefs_X_speaker1, 21:65, 5000)
+summarise_results_1d(curve_1x_speaker1, 1:65, subset(df1, shape == 1)$x)
+```
+
+
+# 1D approaches
+
+```{r}
+# modelling x and y curves separately
+
+# setting degrees
+degree_x <- 5
+degree_y <- 4
+
+coefs_X_speaker1 <- compute_betas(df1, "x", degree_x)
+coefs_Y_speaker1 <- compute_betas(df1, "y", degree_y)
+
+coefs_X_speaker2 <- compute_betas(df2, "x", degree_x)
+coefs_Y_speaker2 <- compute_betas(df2, "y", degree_y)
+
+#####################################################
+
+# Gibbs sampling procedures
+# SPEAKER 1
+# observed portion for curve 1: 21:65
+# observed portion for curve 2: c(1:19, 41:65)
+speaker_1_shape_1_x <- Gibbs_1d(subset(df1, shape == 1)$t_standardised, subset(df1, shape == 1)$x, coefs_X_speaker1, 21:65, 5000)
+summarise_results_1d(speaker_1_shape_1_x$predictions, 1:65, subset(df1, shape == 1)$x)
+
+speaker_1_shape_1_y <- Gibbs_1d(subset(df1, shape == 1)$t_standardised, subset(df1, shape == 1)$y, coefs_Y_speaker1, 21:65, 5000)
+summarise_results_1d(speaker_1_shape_1_y$predictions, 1:65, subset(df1, shape == 1)$y)
+
+# 2d visualisation
+summarise_results_2d(speaker_1_shape_1_x$predictions, speaker_1_shape_1_y$predictions, 1:65, subset(df1, shape == 1)$x, subset(df1, shape == 1)$y)
+
+speaker_1_shape_2_x <- Gibbs_1d(subset(df1, shape == 2)$t_standardised, subset(df1, shape == 2)$x, coefs_X_speaker1, c(1:19, 41:65), 5000)
+summarise_results_1d(speaker_1_shape_2_x$predictions, 1:65, subset(df1, shape == 2)$x)
+
+
+speaker_1_shape_2_y <- Gibbs_1d(subset(df1, shape == 2)$t_standardised, subset(df1, shape == 2)$y, coefs_Y_speaker1, c(1:19, 41:65), 5000)
+summarise_results_1d(speaker_1_shape_2_y$predictions, 1:65, subset(df1, shape == 2)$y)
+
+
+# SPEAKER 2
+# observed portion for curve 1: 21:45
+# observed portion for curve 2: c(1:19, 36:45)
+
+speaker_2_shape_1_x <- Gibbs_1d(subset(df2, shape == 1)$t_standardised, subset(df2, shape == 1)$x, coefs_X_speaker2, 21:45, 5000)
+summarise_results_1d(speaker_2_shape_1_x$predictions, rev(1:45), subset(df2, shape == 1)$x)
+
+
+speaker_2_shape_1_y <- Gibbs_1d(subset(df2, shape == 1)$t_standardised, subset(df2, shape == 1)$y, coefs_Y_speaker2, 21:45, 5000)
+summarise_results_1d(speaker_2_shape_1_y$predictions, rev(1:45), subset(df2, shape == 1)$y)
+
+summarise_results_2d(speaker_2_shape_1_x$predictions, speaker_2_shape_1_y$predictions, rev(1:65), subset(df2, shape == 1)$x, subset(df2, shape == 1)$y)
+
+
+speaker_2_shape_2_x <- Gibbs_1d(subset(df2, shape == 2)$t_standardised, subset(df2, shape == 2)$x, coefs_X_speaker2, c(1:19, 36:45), 5000)
+summarise_results_1d(speaker_2_shape_2_x$predictions, rev(1:45), subset(df2, shape == 2)$x)
+
+
+speaker_2_shape_2_y <- Gibbs_1d(subset(df2, shape == 2)$t_standardised, subset(df2, shape == 2)$y, coefs_Y_speaker2, c(1:19, 36:45), 5000)
+summarise_results_1d(speaker_2_shape_2_y$predictions, rev(1:45), subset(df2, shape == 2)$y)
+```
+
+
+# 2D approaches
+
+```{r}
+# modelling x and y curves together
+# note that here we allow to select from both speaker 1 and speaker 2
+# that is because we need 11 curves (6+5 parameters in total)
+
+# setting degrees
+degree_x <- 5
+degree_y <- 4
+
+coefs_X_speaker1 <- compute_betas(df1, "x", degree_x)
+coefs_Y_speaker1 <- compute_betas(df1, "y", degree_y)
+
+coefs_X_speaker2 <- compute_betas(df2, "x", degree_x)
+coefs_Y_speaker2 <- compute_betas(df2, "y", degree_y)
+
+
+# combining information from speaker 1 and 2
+coefs_X <- rbind(coefs_X_speaker1, coefs_X_speaker2)
+coefs_Y <- rbind(coefs_Y_speaker1, coefs_Y_speaker2)
+
+#######################################################
+# Gibbs sampling procedures
+# SPEAKER 1
+# observed portion for curve 1: 21:65
+# observed portion for curve 2: c(1:19, 41:65)
+
+speaker1_curve1 <- Gibbs_2d(subset(df1, shape == 1)$t_standardised, subset(df1, shape == 1)$x, subset(df1, shape == 1)$y, coefs_X, coefs_Y, 21:65, simulations)
+
+summarise_results_1d(speaker1_curve1$predictions[1:65, ], 1:65, subset(df1, shape == 1)$x)
+
+summarise_results_2d(speaker1_curve1$predictions[1:65, ], speaker1_curve1$predictions[66:130, ], 1:65, subset(df1, shape == 1)$x, subset(df1, shape == 1)$y)
+
+speaker1_curve2 <- Gibbs_2d(subset(df1, shape == 2)$t_standardised, subset(df1, shape == 2)$x, subset(df1, shape == 2)$y, coefs_X, coefs_Y, c(1:19, 41:65), simulations)
+
+summarise_results_1d(speaker1_curve2$predictions[1:65, ], 1:65, subset(df1, shape == 2)$x)
+
+summarise_results_2d(speaker1_curve2$predictions[1:65, ], speaker1_curve2$predictions[66:130, ], 1:65, subset(df1, shape == 2)$x, subset(df1, shape == 2)$y)
+
+# SPEAKER 2
+# observed portion for curve 1: 21:45
+# observed portion for curve 2: c(1:19, 36:45)
+
+speaker2_curve1 <- Gibbs_2d(subset(df2, shape == 1)$t_standardised, subset(df2, shape == 1)$x, subset(df2, shape == 1)$y, coefs_X, coefs_Y, 21:45, simulations)
+
+summarise_results_1d(speaker2_curve1$predictions[1:45, ], rev(1:45), subset(df2, shape == 1)$x)
+
+summarise_results_2d(speaker2_curve1$predictions[1:45, ], speaker2_curve1$predictions[46:90, ], 1:45, subset(df2, shape == 1)$x, subset(df2, shape == 1)$y)
+
+
+speaker2_curve2 <- Gibbs_2d(subset(df2, shape == 2)$t_standardised, subset(df2, shape == 2)$x, subset(df2, shape == 2)$y, coefs_X, coefs_Y, c(1:19, 36:45), simulations)
+
+summarise_results_2d(speaker2_curve2$predictions[1:45, ], speaker2_curve2$predictions[46:90, ], 1:45, subset(df2, shape == 2)$x, subset(df2, shape == 2)$y)
+```
+
