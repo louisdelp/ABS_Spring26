@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
 library(ggplot2)
 library(MASS)
+library(coda)
 ```
 
 ## Data Preprocessing
@@ -565,5 +566,72 @@ summarise_results_2d(speaker2_curve1$predictions[1:45, ], speaker2_curve1$predic
 speaker2_curve2 <- Gibbs_2d(subset(df2, shape == 2)$t_standardised, subset(df2, shape == 2)$x, subset(df2, shape == 2)$y, coefs_X, coefs_Y, c(1:19, 36:45), simulations)
 
 summarise_results_2d(speaker2_curve2$predictions[1:45, ], speaker2_curve2$predictions[46:90, ], 1:45, subset(df2, shape == 2)$x, subset(df2, shape == 2)$y)
+```
+
+# Diagnostics MCMC
+```{r}
+# Let us define our diagnostics MCMC function
+mcmc_diag <- function(Gibbs_Output, burnin){
+  # First, extract the samples matrice
+  beta_samples <- as.matrix(Gibbs_Output$beta_samples)
+  
+  # Store the dimensions, S is the number of iterations, P the number of parameters
+  S <- nrow(beta_samples)
+  p <- ncol(beta_samples)
+  
+  # Check that burn-in is smaller than the number of iterations
+  if (burnin >= S){
+    stop("The burnin (", burnin, "is bigger than the total number of samples", S)
+  }
+  
+  # Now, apply the burn-in
+  beta_sampclean <- beta_samples[(burnin+1):S, ,drop=FALSE]
+  
+  # TRACEPLOT:
+  # Let's do a Traceplot for each beta to check the MCMC
+  param_names <- paste0("Beta_", 1:p) # Will be used for the name of traceplot
+  # Just to be readable, we put 3 graphs per row.
+  n_rowgraph <- ceiling(p/3)
+  n_colgraph <- 3 
+  par(mfrow = c(n_rowgraph, n_colgraph))
+  
+  for (j in 1:p){ # for each parameter
+    plot(1:S, beta_samples[,j], type="l", main = paste("Traceplot of", param_names[j]), xlab = "iterations", ylab = "value of beta", col = "blue1")
+    abline(v = burnin, col = "red2", lty = 2) # Add a vertical line at the burn-in
+  }
+
+  
+  # AUTOCORRELATION FUNCTION:
+  # Now, let's plot the autocorrelation functions
+  for (j in 1:p){
+    acf(beta_sampclean[,j], main = paste("ACF of", param_names[j]), lag.max = 50, cex.main = 0.9)
+  }
+  
+  # EFFECTIVE SAMPLE SIZE
+  # We use the coda package, but first we have to convert beta_sampclean into an mcmc object
+  beta_mcmc <- as.mcmc(beta_sampclean)
+  colnames(beta_mcmc) <- param_names
+  
+  # Now, we can compute the effective sample size for each parameter
+  ess <- effectiveSize(beta_mcmc)
+  print(paste("Minimum ESS", min(ess)))
+  print(paste("Mean ESS", mean(ess)))
+  print(round(ess, 1))
+  
+  # Return invisibly a list of ess and corresponding beat_sampclean
+  invisible(list(ess = ess, beta_sampclean = beta_sampclean))
+}
+```
+
+# Cell to see the output !
+```{r}
+speaker_1_shape_1_x <- Gibbs_1d(
+  subset(df1, shape == 1)$t_standardised,
+  subset(df1, shape == 1)$x,
+  coefs_X_speaker1, 21:65, 5000
+)
+
+res <- mcmc_diag(speaker_1_shape_1_x, 500)
+res$ess
 ```
 
