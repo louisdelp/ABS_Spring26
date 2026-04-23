@@ -23,8 +23,8 @@ library(splines)
 
 ```{r}
 # loading data
-load(file = "ABS_Spring26/data/speaker1_tongue_shapes.RData")
-load(file = "ABS_Spring26/data/speaker2_tongue_shapes.RData")
+load(file = "data/speaker1_tongue_shapes.RData")
+load(file = "data/speaker2_tongue_shapes.RData")
 
 # transforming data into a data frame shape
 # first speaker
@@ -705,12 +705,13 @@ res <- mcmc_diag(speaker_1_shape_1_x, 500)
 res$ess
 ```
 
-=======
-# 1D HLM approach
+
+
+# Bayesian Hierarchical Linear Modeling - 1D Approach
+
+
 ```{r}
 # fitting hlm with b-splines + gibbs
-# y_j | beta_j, sig2 ~ N(X_j * beta_j, sig2 * I)
-# beta_j | theta, Sigma ~ N(theta, Sigma)
 
 hlm_with_bspline_gibbs <- function(dataframe, df = 6, Ngibbs = 5000, target_var = "x") {
   tictoc::tic()
@@ -756,44 +757,40 @@ hlm_with_bspline_gibbs <- function(dataframe, df = 6, Ngibbs = 5000, target_var 
   # sig2 ~ InvGamma
   nu0 <- 1
   
-  # empirical bayes trick: initialize sig2 with pooled variance to keep the chain stable
+  #initialize sig2 with pooled variance
   sig20 <- var(unlist(Y), na.rm = TRUE)
   if(is.na(sig20) || sig20 == 0) sig20 <- 1
   
-  # --- initizalise MCMC
+  # --- initizalise gibbs
   theta <- mu0
   Sigma <- S0
   inv_Sigma <- solve(Sigma)
   sig2 <- sig20
-  
   BETA <- matrix(0, nrow = m, ncol = p)
   theta_samples <- matrix(NA, nrow = Ngibbs, ncol = p)
   
-  # track SSR for diagnostics
+  # stiore SSR for diagnostics
   ssr_samples <- numeric(Ngibbs)
   all_pred_samples <- lapply(1:m, function(x) matrix(NA, nrow = Ngibbs, ncol = n_points))
   names(all_pred_samples) <- as.character(shapes) 
   
-  # --- gibbs
+  # gibbs
   for (iter in 1:Ngibbs) {
     
-    # 1. update beta_j (shape specific coefs)
-    # standard conjugate update - precisions add up (prior + data)
+    # sample beta_j
     for (j in 1:m) {
       Vj <- solve(inv_Sigma + (t(X[[j]]) %*% X[[j]]) / sig2)
       Ej <- Vj %*% (inv_Sigma %*% theta + (t(X[[j]]) %*% Y[[j]]) / sig2) 
       BETA[j, ] <- mvrnorm(1, mu = Ej, Sigma = Vj) #sample betas
     }
     
-    # 2. update theta (population average shape)
-    # pool info across all shapes to figure out the master template
+    # sample theta (population average shape)
     Lm <- solve(Lambda0_inv + m * inv_Sigma) 
     mum <- Lm %*% (Lambda0_inv %*% mu0 + inv_Sigma %*% colSums(BETA))
     theta <- as.vector(mvrnorm(1, mu = mum, Sigma = Lm)) #sample thetas
-    
-    # 3. update Sigma (between-shape cov matrix)
-    # calculate scatter matrix (deviations from the average)
-    # this dictates the shrinkage: smaller sigma => stronger pull toward theta
+    # sample Sigma (between-shape cov matrix)
+    # calculate deviations from the average
+    # dictates the shrinkage: smaller sigma => stronger pull toward theta
     S_theta <- matrix(0, p, p)
     for (j in 1:m) {
       diff <- BETA[j, ] - theta
@@ -802,8 +799,8 @@ hlm_with_bspline_gibbs <- function(dataframe, df = 6, Ngibbs = 5000, target_var 
     Sigma <- riwish(v = eta0 + m, S = S0 + S_theta) #sample sigma
     inv_Sigma <- solve(Sigma) # precompute for the next loop
     
-    # 4. update sig2 and get predictions
-    # assuming homoscedasticity here (one global variance)
+    # update sig2
+    # assuming homoscedasticity (one global variance within shape)
     SSR <- 0
     for (j in 1:m) {
       shape_residuals <- Y[[j]] - X[[j]] %*% BETA[j, ]
@@ -828,6 +825,93 @@ hlm_with_bspline_gibbs <- function(dataframe, df = 6, Ngibbs = 5000, target_var 
     ssr_samples = ssr_samples
   ))
 }
+
+
+plot_traces <- function(samples, burn_in, var_name) {
+  par(mfrow = c(2, 1), family = "serif", mar = c(4, 5, 3, 2) + 0.1, bty = "l", las = 1)
+  
+  for (idx in c(1, 5)) {
+    plot(samples[, idx], type = "l", col = rgb(0.2, 0.2, 0.2, alpha = 0.8), lwd = 0.5,
+         main = bquote(.(var_name) ~ "Trace Plot: " ~ theta[.(idx)]),
+         xlab = "Iteration", ylab = bquote(theta[.(idx)]))
+    abline(v = burn_in, col = "red", lty = 2, lwd = 1.2)
+    abline(h = mean(samples[-(1:burn_in), idx]), col = "blue", lty = 3, lwd = 1.5)
+  }
+  par(mfrow = c(1, 1), family = "", bty = "o", las = 0) # Reset
+}
+
+
+plot_1d_reconstruction <- function(pred_samples, burn_in, observed_data, observed_t, full_points, var_name) {
+  valid_samples <- pred_samples[-(1:burn_in), ]
+  post_mean <- colMeans(valid_samples)
+  post_lower <- apply(valid_samples, 2, quantile, probs = 0.025)
+  post_upper <- apply(valid_samples, 2, quantile, probs = 0.975)
+  
+  valid_idx <- which(!is.na(observed_data) & !is.nan(observed_data))
+  observed_vals <- observed_data[valid_idx]
+  obs_t <- observed_t[valid_idx] 
+  
+  par(family = "serif", mar = c(5, 5, 4, 2) + 0.1, bty = "l", las = 1)
+  
+  plot(full_points, post_mean, type = "n", 
+       ylim = range(c(post_lower, post_upper, observed_vals), na.rm = TRUE),
+       xlab = expression(paste(italic(t))), ylab = bquote(italic(.(tolower(var_name))(t))),
+       main = paste("Reconstruction of Partially Observed Shape (", var_name, ")", sep=""),
+       cex.main = 1.2, cex.lab = 1.1)
+  
+  # Plot 95% Point-wise Credible Band
+  polygon(c(full_points, rev(full_points)), c(post_lower, rev(post_upper)),
+          col = rgb(0.5, 0.5, 0.5, alpha = 0.3), border = NA)
+  lines(full_points, post_mean, col = "black", lwd = 2)
+  
+  points(obs_t, observed_vals, pch = 21, bg = "red", col = "white", cex = 1.2)
+  
+  legend("topleft", legend = c("Posterior Mean", "95% CI", "Observed Data"),
+         lwd = c(2, NA, NA), pch = c(NA, 15, 21),
+         pt.bg = c(NA, rgb(0.5, 0.5, 0.5, alpha = 0.3), "red"),
+         col = c("black", rgb(0.5, 0.5, 0.5, alpha = 0.3), "white"), bty = "n")
+  par(family = "", bty = "o", las = 0) # Reset
+}
+
+
+plot_2d_reconstruction <- function(samples_x, samples_y, burn_in, obs_x, obs_y) {
+  valid_x <- samples_x[-(1:burn_in), ]
+  valid_y <- samples_y[-(1:burn_in), ]
+  
+  mean_x <- colMeans(valid_x)
+  mean_y <- colMeans(valid_y)
+  
+  low_x <- apply(valid_x, 2, quantile, probs = 0.025)
+  up_x <- apply(valid_x, 2, quantile, probs = 0.975)
+  low_y <- apply(valid_y, 2, quantile, probs = 0.025)
+  up_y <- apply(valid_y, 2, quantile, probs = 0.975)
+  
+  par(family = "serif", mar = c(5, 5, 4, 2) + 0.1, bty = "l", las = 1)
+  
+  plot(mean_x, mean_y, type = "n", xlab = "X Coordinate", ylab = "Y Coordinate",
+       main = "2D Reconstruction with Posterior Uncertainty",
+       xlim = range(c(low_x, up_x, obs_x), na.rm = TRUE),
+       ylim = range(c(low_y, up_y, obs_y), na.rm = TRUE),
+       cex.main = 1.2, cex.lab = 1.1)
+  
+  # Plotting a subset of posterior draws to visualize joint trajectory uncertainty
+  set.seed(42)
+  draws <- sample(1:nrow(valid_x), min(150, nrow(valid_x)))
+  for (i in draws) {
+    lines(valid_x[i, ], valid_y[i, ], col = rgb(0.5, 0.5, 0.5, alpha = 0.04), lwd = 1)
+  }
+  
+  lines(mean_x, mean_y, col = "black", lwd = 2)
+  points(obs_x, obs_y, pch = 21, bg = "red", col = "white", cex = 1.2)
+  
+  legend("topleft", legend = c("Posterior Mean", "Posterior Samples", "Observed"),
+         lwd = c(2, 2, 1, NA), pch = c(NA, NA, NA, 21),
+         col = c("black", rgb(0.5, 0.5, 0.5, alpha = 0.5), rgb(0, 0, 1, alpha = 0.3), "black"),
+         pt.bg = c(NA, NA, NA, "red"), bty = "n", cex = 0.9)
+  
+  par(family = "", bty = "o", las = 0) # Reset
+}
+
 
 ###### main
 run_main <- function(dataset, dataset_name = "Data", shapes_to_plot = c(1, 2), burn_in = 1000) {
@@ -863,6 +947,7 @@ run_main <- function(dataset, dataset_name = "Data", shapes_to_plot = c(1, 2), b
     shape_char <- as.character(target_shape_id)
     
     preds_x <- hm_results_x$all_predictions[[shape_char]]
+    #print(preds_x)
     preds_y <- hm_results_y$all_predictions[[shape_char]]
     
     # local rmse
@@ -902,3 +987,4 @@ run_main <- function(dataset, dataset_name = "Data", shapes_to_plot = c(1, 2), b
 run_main(dataset = df1, dataset_name = "df1", shapes_to_plot = c(1, 2))
 run_main(dataset = df2, dataset_name = "df2", shapes_to_plot = c(1, 2))
 ```
+
